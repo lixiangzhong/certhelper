@@ -7,13 +7,26 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"sort"
 	"sync"
 	"time"
+
+	"github.com/lixiangzhong/certhelper/pkcs7"
 )
 
 var (
 	httpclient = new(http.Client)
 )
+
+var ParseCertificatesPKCS7 = pkcs7.ExtractCertificates
+
+func ParseCertificatePKCS7(data []byte) (*x509.Certificate, error) {
+	certs, err := pkcs7.ExtractCertificates(data)
+	if err != nil {
+		return nil, err
+	}
+	return certs[0], nil
+}
 
 func ParseCertificatePEM(pemBytes []byte) (*x509.Certificate, error) {
 	certs, err := ParseCertificatesPEM(pemBytes)
@@ -77,17 +90,25 @@ func fetchIssuerCertificate(url string) (*x509.Certificate, error) {
 	if err != nil {
 		return nil, err
 	}
-	issuer, err := ParseCertificateDER(b)
+	var issuers []*x509.Certificate
+
+	issuer, err := ParseCertificatesPKCS7(b)
 	if err == nil {
-		issuerCache[url] = issuer
-		return issuer, nil
+		issuers = append(issuers, issuer...)
 	}
-	issuer, err = ParseCertificatePEM(b)
+	issuer, err = ParseCertificatesDER(b)
 	if err == nil {
-		issuerCache[url] = issuer
-		return issuer, nil
+		issuers = append(issuers, issuer...)
 	}
-	return nil, err
+	issuer, err = ParseCertificatesPEM(b)
+	if err == nil {
+		issuers = append(issuers, issuer...)
+	}
+	sort.Slice(issuers, func(i, j int) bool {
+		return issuers[i].NotAfter.After(issuers[j].NotAfter)
+	})
+	issuerCache[url] = issuers[0]
+	return issuers[0], nil
 }
 
 func EncodeCertificatePEM(cert ...*x509.Certificate) []byte {
@@ -125,4 +146,31 @@ func fetchCRL(url string) (*x509.RevocationList, error) {
 	}
 	crlCache[url] = crl
 	return crl, nil
+}
+
+var (
+	KeyUsageNames = map[x509.KeyUsage]string{
+		x509.KeyUsageDigitalSignature:  "Digital Signature",
+		x509.KeyUsageContentCommitment: "Content Commitment",
+		x509.KeyUsageKeyEncipherment:   "Key Encipherment",
+		x509.KeyUsageDataEncipherment:  "Data Encipherment",
+		x509.KeyUsageKeyAgreement:      "Key Agreement",
+		x509.KeyUsageCertSign:          "Certificate Sign",
+		x509.KeyUsageCRLSign:           "CRL Sign",
+		x509.KeyUsageEncipherOnly:      "Encipher Only",
+		x509.KeyUsageDecipherOnly:      "Decipher Only",
+	}
+)
+
+func KeyUsageName(ku x509.KeyUsage) []string {
+	names := make([]string, 0)
+	for i := 0; i < 9; i++ {
+		keyUsage := x509.KeyUsage(1 << i)
+		if ku&keyUsage != 0 {
+			if name, ok := KeyUsageNames[1<<i]; ok {
+				names = append(names, name)
+			}
+		}
+	}
+	return names
 }
